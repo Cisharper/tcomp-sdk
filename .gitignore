@@ -25,7 +25,6 @@ node_modules
 # Node/tsc
 node_modules/
 npm-debug.*
-dist/
 
 # Data
 *.jsonl
