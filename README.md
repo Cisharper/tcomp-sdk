@@ -1,7 +1,8 @@
-# TComp SDK
+# Tensorswap SDK
 
 - [Getting Started](#getting-started)
 - [Example Code](#example-code)
+- [API Access](#api-access)
 
 ## Getting Started
 
@@ -9,16 +10,16 @@
 
 ```
 # yarn
-yarn add @tensor-oss/tcomp-sdk
+yarn add @tensor-oss/tensorswap-sdk
 # npm
-npm install @tensor-oss/tcomp-sdk
+npm install @tensor-oss/tensorswap-sdk
 ```
 
 ### From source
 
 ```sh
-git clone https://github.com/tensor-hq/tcomp-sdk.git
-cd tcomp-sdk/
+git clone https://github.com/tensor-hq/tensorswap-sdk.git
+cd tensorswap-sdk/
 yarn
 # Build JS files
 yarn tsc
@@ -26,227 +27,155 @@ yarn tsc
 
 ## Example Code
 
+Working examples can be found under `examples/`.
 
 ```ts
-import { AnchorProvider, Wallet } from "@coral-xyz/anchor";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
-import { getLeafAssetId } from "@tensor-hq/tensor-common";
-import {
-  findListStatePda,
-  findTreeAuthorityPda,
-  TCompSDK,
-} from "@tensor-oss/tcomp-sdk";
-import BN from "bn.js";
+const { AnchorProvider, Wallet } = require("@project-serum/anchor");
+const { Connection, Keypair, PublicKey } = require("@solana/web3.js");
+const {
+  TensorSwapSDK,
+  TensorWhitelistSDK,
+  computeTakerPrice,
+  TakerSide,
+  castPoolConfigAnchor,
+  findWhitelistPDA,
+} = require("@tensor-oss/tensorswap-sdk");
 
 const conn = new Connection("https://api.mainnet-beta.solana.com");
-const provider = new AnchorProvider(
-  conn,
-  new Wallet(Keypair.generate()),
-  AnchorProvider.defaultOptions()
-);
-const tcompSdk = new TCompSDK({ provider });
+const provider = new AnchorProvider(conn, new Wallet(Keypair.generate()));
+const swapSdk = new TensorSwapSDK({ provider });
+const wlSdk = new TensorWhitelistSDK({ provider });
 
-// Listing cNFT
-const {
-  tx: { ixs },
-} = await tcompSdk.list({
-  // Retrieve these fields from DAS API
-  merkleTree,
-  root,
-  canopyDepth,
-  index,
-  proof,
-  dataHash,
-  creatorsHash,
-  delegate: delegatePk,
+// ========= Compute current price (Buy + sell)
 
-  owner: ownerPk,
-  rentPayer: rentPayerPk, // optional: payer and recipient of listing rent
-  amount: new BN(priceLamports), // in lamports
-  currency: null, // optional: list for SOL or SPL tokens
-  expireInSec: expireIn ? new BN(expireIn) : null, // seconds until listing expires
-  privateTaker: takerPk, // optional: only this wallet can buy this listing
+// Fetch the pool PDA for its settings.
+const pool = await swapSdk.fetchPool(new PublicKey("<address of target pool>"));
+const config = castPoolConfigAnchor(pool.config);
+
+const price = computeTakerPrice({
+  takerSide: TakerSide.Buy, // or TakerSide.Sell for selling
+  extraNFTsSelected: 0,
+
+  // These fields can be extracted from the pool object above.
+  config,
+  takerSellCount: pool.takerSellCount,
+  takerBuyCount: pool.takerBuyCount,
+  maxTakerSellCount: pool.maxTakerSellCount,
+  statsTakerSellCount: pool.stats.takerSellCount,
+  slippage: <number>, // add optional slippage: in case pool updates on-chain
 });
 
 
-// Fetching the listing
-const nonce = new BN(index);
-const [treeAuthority] = findTreeAuthorityPda({ merkleTree });
-const assetId = getLeafAssetId(merkleTree, nonce);
-const listState = findListStatePda({ assetId });
-const {
-  assetId: listStateAssetId,
-  owner,
-  amount,
-  currency,
-  expiry,
-  privateTaker,
-  makerBroker,
-  rentPayer,
-} = await tcompSdk.fetchListState(listState);
 
-
-// Buying cNFT
-const {
-  tx: { ixs },
-} = await tcompSdk.buy({
-  // Retrieve these fields from DAS API
-  merkleTree,
-  root,
-  canopyDepth,
-  index,
-  proof,
-  sellerFeeBasisPoints,
-  // For constructing metaHash, see example below
-  metaHash,
-  creators,
-
-  payer: payerPk,
-  buyer: buyerPk,
-  owner: ownerPk,
-  makerBroker,
-  rentDest,
-  maxAmount: new BN(priceLamports),
-  optionalRoyaltyPct: 100, // currently required to be 100% (enforced)
-});
-
-
-// Bidding on a single cNFT
-const {
-  tx: { ixs },
-} = await tcompSdk.bid({
-  owner: ownerPk,
-  rentPayer: rentPayerPK, // optional: payer and recipient of bid rent
-  amount: new BN(priceLamports),
-  expireInSec: expireIn ? new BN(expireIn) : null, // seconds until listing expires
-  privateTaker: takerPk, // optional: only this wallet can sell into this bid
-  bidId: new PublicKey(assetId), // asset ID of nft to bid on
-  targetId: new PublicKey(assetId), // asset ID of nft to bid on
-  target: Target.AssetId,
-  quantity: 1,
-
-  // Ignore these for now (advanced usage)
-  margin: null,
-  field: null,
-  fieldId: null,
-});
-```
-### Constructing metaHash
-
-```ts
-const axios = require('axios');
-const BN = require('bn.js');
-const { PublicKey } = require("@solana/web3.js");
-const { keccak_256 } = require('js-sha3');
-const { computeMetadataArgsHash } = require("@tensor-hq/tensor-common");
-const { TokenStandard } = require('@metaplex-foundation/mpl-bubblegum');
-
-const url = `https://mainnet.helius-rpc.com/?api-key=<YOUR_HELIUS_API_KEY>`
-
-const constructMetaHash = async (mint) => {
-
-  // query DAS API for asset info
-  const assetRes = await axios.post(url, {
-    jsonrpc: '2.0',
-    id: '0',
-    method: 'getAsset',
-    params: {
-      id: mint
-    }
-  });
+// ========= Buying
+{
   const {
-    compression,
-    content,
-    royalty,
-    creators,
-    uses,
-    grouping,
-    supply,
-    ownership: { owner, delegate },
-    mutable,
-  } = assetRes.data.result;
-  const coll = grouping.find((group) => group.group_key === "collection")?.group_value;
-  const tokenStandard = content.metadata.token_standard
-  const dataHashBuffer = new PublicKey(compression.data_hash).toBuffer();
+    tx: { ixs },
+  } = await swapSdk.buyNft({
+    // Whitelist PDA address where name = tensor slug (see TensorWhitelistSDK.nameToBuffer)
+    whitelist,
+    // NFT Mint address
+    nftMint,
+    // Buyer ATA account (destination)
+    nftBuyerAcc,
+    // owner of NFT (in pool PDA)
+    owner,
+    // buyer
+    buyer,
+    // PoolConfig object: construct from pool PDA
+    config,
+    // max price buyer is willing to pay (add ~0.1% for exponential pools b/c of rounding differences)
+    // see `computeTakerPrice` above to get the current price
+    maxPrice
+  });
+  const buyTx = new Transaction(...ixs);
+}
 
-  // construct metadataArgs to hash later
-  // ordering follows https://docs.metaplex.com/programs/token-metadata/accounts
-  var metadataArgs = {
-    name: content?.metadata?.name ?? "",
-    symbol: content?.metadata?.symbol ?? " ",
-    uri: content?.json_uri ?? "",
-    sellerFeeBasisPoints: royalty.basis_points,
-    creators: creators.map((creator) => ({
-      address: new PublicKey(creator.address),
-      share: creator.share,
-      verified: creator.verified,
-    })),
-    primarySaleHappened: royalty.primary_sale_happened,
-    isMutable: mutable,
-    editionNonce: supply?.edition_nonce != null ? supply!.edition_nonce : null,
-    tokenStandard: tokenStandard === "Fungible" ? TokenStandard.Fungible :
-      tokenStandard === "NonFungibleEdition" ? TokenStandard.NonFungibleEdition :
-        tokenStandard === "FungibleAsset" ? TokenStandard.FungibleAsset :
-          TokenStandard.NonFungible,
+// ========= Selling
 
-    // if Helius shows a collection in groupings for a cNFT then it's verified
-    collection: coll ? { key: new PublicKey(coll), verified: true } : null,
-    uses: uses
-      ? {
-        useMethod: uses.use_method === "Burn" ? 0 : uses.use_method === "Multiple" ? 1 : 2,
-        remaining: uses.remaining,
-        total: uses.total,
-      }
-      : null,
+// uuid = Tensor collection ID (see "Collection UUID" API endpoint below)
+const uuid = "..."
 
-    // currently always Original (Token2022 not supported yet)
-    tokenProgramVersion: 0,
-  };
-  const originalMetadata = { ...metadataArgs };
-  const sellerFeeBasisPointsBuffer = new BN(royalty.basis_points).toBuffer("le", 2);
+// Remove "-" symbols from uuid, so it's within the 32 seed length limit. Additionally convert the uuid to a Uint8Array
+const uuidArray = Buffer.from(uuid.replaceAll("-", "")).toJSON().data;
 
-  // hash function on top of candidate metaHash to compare against data_hash
-  const makeDataHash = (metadataArgs) =>
-    Buffer.from(
-      keccak_256.digest(
-        Buffer.concat([
-          new PublicKey(computeMetadataArgsHash(metadataArgs)).toBuffer(),
-          sellerFeeBasisPointsBuffer,
-        ])
-      )
-    );
+// Finding the PDA address
+const wlAddr = findWhitelistPDA({uuid: uuidArray})[0];
 
-  // try original metadataArgs
-  var hash = makeDataHash(metadataArgs);
-  if (hash.equals(dataHashBuffer)) return computeMetadataArgsHash(metadataArgs);
+// Step 1: Prepare the mint proof PDA (if required).
+{
+  const wl = await wlSdk.fetchWhitelist(wlAddr);
 
-  // try tokenStandard = null
-  metadataArgs.tokenStandard = null;
-  hash = makeDataHash(metadataArgs);
-  if (hash.equals(dataHashBuffer)) return computeMetadataArgsHash(metadataArgs);
+  // Proof is only required if rootHash is NOT a 0 array, o/w not necessary!
+  if(JSON.stringify(wl.rootHash) !== JSON.stringify(Array(32).fill(0))) {
+    // Off-chain merkle proof (see "Mint Proof" API endpoint below).
+    const proof = ...;
 
-  // try name + uri = "", tokenStandard = null
-  metadataArgs.name = "";
-  metadataArgs.uri = "";
-  hash = makeDataHash(metadataArgs);
-  if (hash.equals(dataHashBuffer)) return computeMetadataArgsHash(metadataArgs);
+    const {
+      tx: { ixs },
+    } = await wlSdk.initUpdateMintProof({
+      // User signing the tx (the seller)
+      user,
+      whitelist: wlAddr,
+      // (NFT) Mint address
+      mint,
+      proof,
+    });
+    const proofTx = new Transaction(...ixs);
+  }
+}
 
-  // try name + uri = "", tokenStandard = 0
-  metadataArgs.tokenStandard = 0;
-  hash = makeDataHash(metadataArgs);
-  if (hash.equals(dataHashBuffer)) return computeMetadataArgsHash(metadataArgs);
+// Step 2: Send sell tx.
+{
+  const {
+    tx: { ixs },
+  } = await swapSdk.sellNft({
+    type: "token", // or 'trade' for a trade pool
+    whitelist: wlAddr,
+    // NFT Mint address
+    nftMint,
+    // Token account holding seller's mint
+    nftSellerAcc,
+    // owner of NFT (in pool PDA)
+    owner,
+    // seller
+    seller,
+    // PoolConfig object: construct from pool PDA
+    config,
+    // min price seller is willing to receive (sub ~0.1% for exponential pools b/c of rounding differences)
+    // see `computeTakerPrice` above to get the current price
+    minPrice,
+  });
+  const sellTx = new Transaction(...ixs);
+}
 
-  // try reversing creators
-  metadataArgs.creators.reverse();
-  metadataArgs.name = originalMetadata.name;
-  metadataArgs.uri = originalMetadata.uri;
-  metadataArgs.tokenStandard = originalMetadata.tokenStandard;
-  hash = makeDataHash(metadataArgs);
-  if (hash.equals(dataHashBuffer)) return computeMetadataArgsHash(metadataArgs);
-
-  // can't match - return null
-  return null;
-};
-
-constructMetaHash("8H6C2tGh5Yu5jGXUbFtZ17FQTDyBAEQ4LfGA527QLXYQ");
+// ========= TODO: initPool / closePool / editPool / withdrawNft / depositNft / withdrawSol / depositSol
 ```
+
+## API Access
+
+Docs can be [found here](https://tensor-hq.notion.site/PUBLIC-Tensor-Trade-API-alpha-b18e1a196187473bac9b5d6de5b47032).
+
+Ping us in our [Discord](https://www.discord.com/invite/a8spfqxEpC) for access.
+
+### Collection UUID
+
+You can query all Tensor collections and their metadata, including their `id` which
+corresponds to `whitelist.uuid` with [this query](https://www.notion.so/tensor-hq/PUBLIC-Tensor-Trade-API-alpha-b18e1a196187473bac9b5d6de5b47032#56b333bfe0b641f8acad51a963a04f4f).
+
+Alternative, you can find a collection for a corresponding mint:
+1. [Get the mint's Tensor slug](https://www.notion.so/tensor-hq/PUBLIC-Tensor-Trade-API-alpha-b18e1a196187473bac9b5d6de5b47032#5ae4f2d0499a4c6ba3ceed4f9ee949ad)
+2. [Get the collection's ID](https://www.notion.so/tensor-hq/PUBLIC-Tensor-Trade-API-alpha-b18e1a196187473bac9b5d6de5b47032#59c583754aa2477caacd2b436071d564)
+3. Use the ID as the `uuid` for the whitelist
+
+The ID for a collection will never change, so feel free to cache this locally.
+
+A mint's collection will almost always never change (99% of the time), so feel free to cache this as needed and update if necessary.
+
+### Mint Proof
+
+For selling and depositing and for some collections (where `whitelist.rootHash` is not a 0-zero),
+you will need to fetch the off-chain [merkle proofs](https://en.wikipedia.org/wiki/Merkle_tree) we use for collection whitelisting from our API.
+
+Endpoint + example can be [found here](https://www.notion.so/tensor-hq/PUBLIC-Tensor-Trade-API-alpha-b18e1a196187473bac9b5d6de5b47032#9be7fb3fc59f49e08cc10a0d7d1d7ba7).
+
